@@ -1,0 +1,8 @@
+version: "3"
+services:
+  mobile-api:
+    image: eazymobility/mobile-api
+    volumes:
+      - .:/api
+    ports:
+      - "5000:5000"

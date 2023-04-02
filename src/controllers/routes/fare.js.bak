@@ -1,0 +1,291 @@
+const Utils = require("../../utils/utils");
+const routeUtils = require("../../utils/route.utils");
+const {
+  SearchAddress,
+  Setting,
+  Location,
+  Route,
+  RouteStop,
+  RouteDetail,
+} = require("../../models");
+const _ = require("lodash");
+const objectIdToTimestamp = require("objectid-to-timestamp");
+const moment = require("moment-timezone");
+
+module.exports = {
+  searchroute: async (req, res) => {
+    try {
+      const {
+        pickup_lat,
+        pickup_long,
+        drop_lat,
+        drop_long,
+        search_type,
+        current_date,
+        type,
+      } = req.body;
+
+      // const appSettings = await Utils.getSetting() // get application Settings
+      const tax = 5;
+      var rId = [];
+     // const current_date = moment().format('YYYY-MM-DD');
+      const day = moment.tz(current_date).format("dddd").toLowerCase();
+      if (type == "oneway") {
+        const pickupData = await RouteStop.formatpickup(
+          await RouteStop.getNearestStop(
+            "pickup",
+            pickup_long,
+            pickup_lat,
+            day,
+            current_date
+          )
+        );
+        const dropData = await RouteStop.formatdrop(
+          await RouteStop.getNearestStop(
+            "drop",
+            drop_long,
+            drop_lat,
+            day,
+            current_date
+          )
+        );
+
+	console.log('pickupData',pickupData,'dropData',dropData)
+        if (pickupData != "" && dropData != "") {
+          var mergeroutes = pickupData.map((item, i) =>
+            Object.assign({}, item, dropData[i])
+          );
+
+          res.status(200).json({
+            status: true,
+            message: "Successfully found route",
+            data: {  date:current_date,
+              routes: RouteStop.transformRouteData(mergeroutes)
+			  }
+          });
+        } else {
+          res.status(200).json({
+            status: false,
+            message: "no found route",
+          });
+        }
+      } else if (search_type == "google") {
+        loc1 = await SearchAddress.get(from); // from
+        loc2 = await SearchAddress.get(to); // to
+
+        console.log(loc1, loc2);
+        lat1 = loc1.location.coordinates[1];
+        long1 = loc1.location.coordinates[0];
+        lat2 = loc2.location.coordinates[1];
+        long2 = loc2.location.coordinates[0];
+        distance = Utils.findDistance(
+          loc1.location.coordinates,
+          loc2.location.coordinates
+        );
+
+        var location1 = await SearchAddress.nearBy(
+          loc1.location.coordinates,
+          5
+        ); // near 5 km fetch data
+        var location2 = await SearchAddress.nearBy(
+          loc2.location.coordinates,
+          5
+        ); // near 5 km fetch data
+
+        //console.log("location2", location2, "location1", location1);
+
+        var routes = [];
+        location2.forEach((item) => {
+          routes.push(item._id);
+        });
+        location1.forEach((item) => {
+          routes.push(item._id);
+        });
+
+        const routeIds = await RouteDetail.find(
+          { locationId: routes },
+          { routeId: 1, _id: 0 }
+        );
+
+        routeIds.forEach(async (item) => {
+          rId.push(item.routeId);
+        });
+      }
+
+      //  console.log(rId);
+      //     const data = await Route.find({ _id: rId }).populate('routedetails').populate({
+      //         path: "routedetails",
+      //         populate: { path: "locationId", select: "location title" },
+      //     }).lean();
+      //   //   console.log(data);
+      //     // console.log(rId);
+      //     // const routeDet = await Route.find({ _id: rId }).populate('routedetails');
+      //     // console.log(routeDet);
+      //     // console.log(rout)
+      //     var datar = [];
+      //     data.forEach(function(routes) {
+      //         var route_info = [];
+      //         routes.routedetails.forEach((route_details) => {
+      //             // console.log(route_details)
+      //             // const route_address = loc.location.address;
+      //             const pickup_duration = route_details.duration_pickup
+      //             const drop_duration = route_details.duration_drop
+      //             const minimum_fare_pickup = route_details.minimum_fare_pickup;
+      //             const price_per_km_pickup = route_details.price_per_km_pickup;
+      //             const route_address = route_details.locationId.location.address;
+      //             const longitude = route_details.locationId.location.coordinates[0];
+      //             const latitude = route_details.locationId.location.coordinates[1];
+      //             const distance1 = Utils.findDistance([long1, lat1], route_details.locationId.location.coordinates)
+      //             const distance2 = Utils.findDistance([long2, lat2], route_details.locationId.location.coordinates);
+      //             // console.log(loc._id);
+      //             var route_detl = {};
+      //             if (distance1 < 5 || distance2 < 5) {
+      //                 route_detl = {
+      //                     route_address,
+      //                     longitude,
+      //                     latitude,
+      //                     minimum_fare_pickup,
+      //                     price_per_km_pickup,
+      //                     pickup_duration,
+      //                     drop_duration,
+      //                 }
+      //                 route_info.push(route_detl)
+      //             }
+      //         });
+      //      //   console.log('route_info',route_info);
+      //         routeId = routes._id;
+      //         // console.log(route_info.length);
+      //         if (route_info.length == 2 && datar.length < 5) {
+      //             const total_duration = Utils.findDuration(route_info[1].drop_duration, route_info[0].pickup_duration);
+      //             const amount = Utils.findTotalFare(route_info[0].minimum_fare_pickup, distance, route_info[0].price_per_km_pickup, tax)
+      //             const baseFare = Utils.findBaseFare(route_info[0].minimum_fare_pickup, distance, route_info[0].price_per_km_pickup)
+      //             route_detls = {
+      //                 routeId,
+      //                 tax,
+      //                 baseFare,
+      //                 amount,
+      //                 total_duration,
+      //                 route_info
+      //             }
+      //             datar.push(
+      //                 route_detls
+      //             )
+      //         }
+      //     });
+
+      // if (matchedRoutes.length > 0) {
+      //   res.status(200).json({
+      //     status: true,
+      //     message: "Successfully found route",
+      //     data: {
+      //       routes: matchedRoutes,
+      //     },
+      //   });
+      // } else {
+      //   res.status(200).json({
+      //     status: false,
+      //     message: "route not found. Please click explore route",
+      //   });
+      // }
+    } catch (err) {
+      console.log(err);
+      res.status(404).json({
+        status: false,
+        message: "Location not found",
+        errorMessage: err.message,
+      });
+    }
+  },
+  fetchroutes: async (req, res) => {
+    try {
+      const { pickup_stop_id, drop_stop_id } = req.body;
+
+      const getdata = await RouteStop.findOne(
+        { routeId: req.params.routeId },
+        "stops"
+      ).lean();
+
+      res.status(200).json({
+        status: true,
+        message: "Successfully found route",
+        data: await RouteStop.formatstops(
+          getdata.stops,
+          objectIdToTimestamp(pickup_stop_id),
+          objectIdToTimestamp(drop_stop_id)
+        ),
+      });
+    } catch (err) {
+      console.log(err);
+      res.status(404).json({
+        status: false,
+        message: "Location not found 23",
+        errorMessage: err.message,
+      });
+    }
+  },
+  fetchroutetiming: async (req, res) => {
+    try {   
+      const {route_id,pickup_stop_id,drop_stop_id} = req.body;
+
+
+      res.status(200).json({
+        status: true,
+        message: "Successfully found route",
+        data: { 
+          route_id,pickup_stop_id,drop_stop_id
+        }
+      });
+     } catch (err) {
+      console.log(err);
+      res.status(404).json({
+        status: false,
+        message: "stops not found",
+        errorMessage: err.message,
+      });
+    }
+  },
+  seatprice: async (req, res) => {
+    try { 
+      const { routeId,pickup_stop_id,drop_stop_id,seat_no,busId} = req.body;
+
+        const getdata= await RouteStop.findOne({routeId:routeId}).select({ stops: {$elemMatch: {id: {$in:[pickup_stop_id,drop_stop_id]} }}})
+
+
+        
+        res.status(200).json({
+          status: true,
+          message: "Successfully found route",
+          data: getdata
+        });
+
+    } catch (err) {
+      console.log(err);
+      res.status(404).json({
+        status: false,
+        message: "stops not found",
+        errorMessage: err.message,
+      });
+    }
+  },
+  explore: async (req, res) => {
+    try { 
+      const getdata= await RouteStop.find({})
+         .populate({path:'routeId',select:"title"}).lean();
+
+        //  getdata.stops = await Route.filterStops(getdata.routedestops.stops)
+          res.status(200).json({
+            status: true,
+            message: "Successfully found route",
+            data: await RouteStop.transformData(getdata)
+          });
+
+    } catch (err) {
+      console.log(err);
+      res.status(404).json({
+        status: false,
+        message: "stops not found",
+        errorMessage: err.message,
+      });
+    }
+  },
+};

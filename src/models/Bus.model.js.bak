@@ -1,0 +1,218 @@
+const mongoose = require("mongoose");
+const { omitBy, isNil } = require("lodash");
+const { Schema } = mongoose;
+const moment = require("moment-timezone");
+
+const { ObjectId } = Schema;
+const { RouteBusTimetable } = require('../models')
+// const stopSchema = new Schema();
+const objectIdToTimestamp = require('objectid-to-timestamp')
+
+const RouteStopSchema = new Schema(
+  {
+    routeId: { type: ObjectId, ref: "Route", required: true },
+    stops: [
+      {
+        id: { type: ObjectId, default: null },
+        name: { type: String, default: "", index: true },
+        type: { type: String, default: "out", index: true },
+        location: {
+          type: { type: String, default: "Point" },
+          address: { type: String, default: "" },
+          coordinates: [Number],
+          default: [0, 0],
+        },
+        minimum_fare_pickup: { type: String, default: "", index: true },
+        minimum_fare_drop: { type: String, default: "", index: true },
+        price_per_km_drop: { type: String, default: "", index: true },
+        price_per_km_pickup: { type: String, default: "", index: true },
+        departure_time:{ type: Date, default: "", index: true },
+        arrival_time:{ type: Date, default: "", index: true },
+      },
+    ],
+  },
+  { timestamps: true }
+);
+
+
+RouteStopSchema.index({ "stops.location": "2dsphere" });
+
+
+RouteStopSchema.statics = {
+    async getNearestStop(trip,lng,lat,day,currentDate){
+        try {
+			console.log('ssdfs',trip,lng,lat,day,currentDate)
+            const maxDistance = 2000; // 2000m == 2km
+           // const curentTime = moment().tz('Asia/kolkata').format('HH:mm:ss A');
+            //const convertSec = moment(curentTime, 'HH:mm:ss: A').diff(moment().startOf('day'), 'seconds');
+            //console.log('curentTime',curentTime,'sdd',convertSec);
+            return this.aggregate([
+                {
+                  $geoNear: {
+                    near: {
+                      type: "Point",
+                      coordinates: [parseFloat(lng), parseFloat(lat)],
+                    },
+                    distanceField: "distance",
+                    maxDistance: maxDistance,
+                    distanceField: "actual_distance" ,
+                    spherical: true,
+                    includeLocs: "loc",
+                  },
+                },
+                {
+                    $lookup: {
+                      from: "route_buses",
+                      localField: "routeId",
+                      foreignField: "routeId",
+                      as: "route_bus",
+                    },
+                  },
+                { $unwind: "$route_bus"},
+                {
+                    $project: {
+                        routeId:1,
+                        actual_distance: 1,
+                        route_bus:1,
+                        stop:{ 
+                            "$filter": {
+                              "input": "$stops",
+                              "as": "stop",
+                              "cond": { $eq: [ "$$stop.location", "$loc" ] }
+                            }
+                          },
+                        //   route_bus_start_date: {
+                        //     $dateToString: {
+                        //       format: "%Y-%m-%d",
+                        //       date: "$route_bus.start_date",
+                        //       timezone: "Asia/Kolkata",
+                        //     },
+                        //   },
+                        //   route_bus_end_date: {
+                        //     $dateToString: {
+                        //       format: "%Y-%m-%d",
+                        //       date: "$route_bus.end_date",
+                        //       timezone: "Asia/Kolkata",
+                        //     },
+                        //   },
+                        //   route_bus: 1,
+                        //   busId: "$route_bus.busId"
+                       
+                    },
+                    
+                },
+                { $addFields: {
+                    "trip":trip
+
+                  }
+                },
+                {
+                    $match: {
+                        "route_bus.status": true,
+                        "route_bus.every": { $in: [day] },
+                        $and: [
+                          {
+                            "route_bus.start_date": { $lte: new Date(currentDate) },
+                            "route_bus.end_date": { $gte: new Date(currentDate) },
+                          },
+                         // {
+                            // "route_bus.departure_time": { $lte: convertSec },
+                            // "route_bus.arrival_time": { $gte: convertSec },
+                          // },
+                       ], 
+                    }
+                }
+            ]);
+          } catch (err) {
+            console.log(err);
+            return err;
+          }
+
+    },
+    formatpickup(data){
+        const selectableItems = [];
+        data.forEach(async (item) => {
+         
+            selectableItems.push({
+              id: item._id,
+              pickup_distance: (item.actual_distance / 1000).toFixed(1) + ' km',
+              routeId: item.routeId,
+              route_busId:item.route_bus.busId,
+              pickup_stop_id:item.stop[0].id,
+              pickup_stop_name:item.stop[0].name,
+              pickup_stop_lat:item.stop[0].location.coordinates[1],
+              pickup_stop_lng:item.stop[0].location.coordinates[0],
+              pickup_stop_minimum_fare_pickup:item.stop[0].minimum_fare_pickup,
+            //  pickup_stop_minimum_fare_drop:item.stop[0].minimum_fare_drop,
+            //  pickup_stop_minimum_fare_drop:item.stop[0].price_per_km_drop,
+              pickup_stop_minimum_fare_drop:item.stop[0].price_per_km_pickup,     
+              pickup_stop_departure_time: moment(item.stop[0].departure_time).tz('Asia/kolkata').format('hh:mm A') ,
+  
+            });
+        });
+        return selectableItems;
+    },
+    formatdrop(data){
+        console.log(data);
+        const selectableItems = [];
+        data.forEach((item) => {
+            selectableItems.push({
+              id: item._id,
+              drop_distance: (item.actual_distance / 1000).toFixed(1) + ' km',
+              routeId: item.routeId,
+              drop_stop_id:item.stop[0].id,
+              drop_stop_name:item.stop[0].name,
+              route_busId:item.route_bus.busId,
+              drop_stop_lat:item.stop[0].location.coordinates[1],
+              drop_stop_lng:item.stop[0].location.coordinates[0],
+             // drop_stop_minimum_fare_pickup:item.stop[0].minimum_fare_pickup,
+              drop_stop_minimum_fare_drop:item.stop[0].minimum_fare_drop,
+              drop_stop_price_per_km_drop:item.stop[0].price_per_km_drop,
+            //  drop_stop_minimum_fare_pickup:item.stop[0].price_per_km_pickup, 
+              drop_stop_arrival_time:moment(item.stop[0].arrival_time).tz('Asia/kolkata').format('hh:mm A')
+            });
+        });
+        return selectableItems;
+    },
+    formatstops(data,pickupId,dropId){
+        const selectableItems = [];
+        data.forEach((item) => {
+            selectableItems.push({
+              id: item.id,
+              name:item.name,
+              pickup:(objectIdToTimestamp(item.id) == pickupId) ? true : false,
+              drop:(objectIdToTimestamp(item.id) == dropId) ? true : false,
+              lat:item.location.coordinates[1],
+              lng:item.location.coordinates[0]
+            });
+        });
+        return selectableItems;
+    },
+	 transformData(data){
+      const selectableItems = [];
+      data.forEach((item) => {
+          selectableItems.push({
+            routeId:item.routeId._id,
+            route_title:item.routeId.title,
+            stops:this.transformStopData(item.stops)
+          });
+      });
+      return selectableItems;
+    },
+    transformStopData(data) {
+      const selectableItems = [];
+      data.forEach((item) => {
+          selectableItems.push({
+            id: item.id,
+            name:item.name,
+            lat:item.location.coordinates[1],
+            lng:item.location.coordinates[0]
+          });
+      });
+      return selectableItems;
+    }
+
+
+}
+
+module.exports = mongoose.model("Route_Stop", RouteStopSchema);

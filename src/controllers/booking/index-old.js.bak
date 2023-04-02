@@ -1,0 +1,701 @@
+const Utils = require("../../utils/utils");
+const routeUtils = require("../../utils/route.utils");
+const {
+    Setting,
+    Location,
+    Passenger,
+    Booking,
+    Wallet,
+    Payment,
+    User,
+    Ticket
+} = require("../../models");
+const _ = require("lodash");
+const objectIdToTimestamp = require("objectid-to-timestamp");
+const moment = require("moment-timezone");
+const {
+    nanoid
+} = require('nanoid');
+const crypto = require("crypto");
+const em = require("../../events/listener");
+const {
+    HelperCustom
+} = require('../../helpers')
+
+    module.exports = {
+    offerApplied: async(req, res) => {
+        try {
+            const {
+                offer_id,
+                code
+            } = req.body;
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+    create: async(req, res) => {
+        try {
+            const {
+                userId,
+                walletId
+            } = req.session;
+            const {
+                fareData,
+                passengerDetailsItem,
+                offer_id
+            } = req.body;
+
+            console.log('req.body', req.body);
+            const seats = fareData.seat_no.replace(/\[|\]/g, '').split(','); // convert string to Array
+            const passengers = seats.length;
+            const walletBalance = await Wallet.findById(walletId);
+            const saveObj = {
+                pnr_no: fareData.pnr_no,
+                routeId: fareData.route_id,
+                pickupId: fareData.pickup_stop_id,
+                dropoffId: fareData.drop_stop_id,
+                busId: fareData.bus_id,
+                offerId: offer_id ? offer_id : null,
+                userId,
+                seat_nos: seats,
+                distance: fareData.distance,
+                has_return: fareData.has_return === "1" ? false : true,
+                start_time: fareData.pickup_time,
+                start_date: fareData.created_date,
+                drop_time: fareData.drop_time,
+                drop_date: fareData.created_date,
+                passengers,
+                sub_total: fareData.sub_total,
+                final_total_fare: fareData.final_total_fare,
+                tax: fareData.tax,
+                fee: fareData.fee,
+                ip: req.ip,
+                travel_status: "SCHEDULED"
+            };
+
+            if (!(await Booking.exists({
+                        pnr_no: fareData.pnr_no
+                    }))) {
+
+                const TicketId = await Ticket.create(fareData.bus_id);
+                saveObj.ticketId = (TicketId) ? TicketId : null;
+                const getbookingData = await new Booking(saveObj).save();
+                if (getbookingData) {
+                    const bookingId = getbookingData._id;
+                    const getBooking = await Booking.findOne({
+                        pnr_no: getbookingData.pnr_no
+                    })
+                        .populate({
+                        path: 'routeId',
+                        select: 'title'
+                    })
+                        .populate({
+                        path: 'pickupId',
+                        select: 'title'
+                    })
+                        .populate({
+                        path: 'dropoffId',
+                        select: 'title'
+                    })
+                        .populate({
+                        path: 'busId',
+                        select: 'name model_no'
+                    })
+                        .lean();
+                    const passenger = await Passenger.passengerFormatData(
+                            bookingId,
+                            fareData.bus_id,
+                            userId,
+                            passengerDetailsItem);
+                    const persistedPassenger = await Passenger.insertMany(passenger);
+                    res.status(200).json({
+                        status: true,
+                        message: "Successfully booked ticket",
+                        data: {
+                            getbookingData: await Booking.singletransformData(getBooking),
+                            persistedPassenger: await Passenger.transformFormatData(persistedPassenger),
+                            walletBalance: walletBalance.amount
+                        },
+                    });
+                } else {
+                    res.status(200).json({
+                        status: false,
+                        message: "booking ticket failed.",
+                    });
+                }
+            } else {
+
+                const getBooking = await Booking.findOne({
+                    pnr_no: fareData.pnr_no
+                }).populate({
+                    path: 'routeId',
+                    select: 'title'
+                })
+                    .populate({
+                    path: 'pickupId',
+                    select: 'title'
+                })
+                    .populate({
+                    path: 'dropoffId',
+                    select: 'title'
+                })
+                    .populate({
+                    path: 'busId',
+                    select: 'name model_no'
+                })
+                    .lean();
+
+                const getPassenger = await Passenger.find({
+                    bookingId: getBooking._id
+                }).lean();
+
+                res.status(200).json({
+                    status: true,
+                    message: "booking already saved.",
+                    data: {
+                        getbookingData: await Booking.singletransformData(getBooking),
+                        persistedPassenger: await Passenger.transformFormatData(getPassenger),
+                        walletBalance: walletBalance.amount
+                    }
+                });
+
+            }
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+    passPayment: async(req, res) => {
+        try {
+            const {
+                bus_id,
+                pass_id,
+                pass_amount,
+                pass_no_of_rides,
+                route_id,
+                pickup_stop_id,
+                drop_stop_id,
+                seat_no,
+                has_return,
+                payment_mode
+            } = req.body;
+            const {
+                userId,
+                walletId
+            } = req.session;
+
+            if (payment_mode === "WALLET") {
+                const checkBalance = await Wallet.findOne({
+                    users: userId
+                });
+                if (parseInt(checkBalance.amount) > parseInt(pass_amount)) {
+                    const BalanceAmount = parseInt(checkBalance.amount) - parseInt(pass_amount); // deduct amount
+                    const updateWallet = await Wallet.updateOne({
+                        users: userId
+                    }, {
+                        amount: BalanceAmount
+                    }, );
+                    if (updateWallet.n > 0) {
+
+                        const getBookingIds = await HelperCustom.generateSinglePass(payment_mode, userId, bus_id, route_id, pickup_stop_id, drop_stop_id, seat_no, has_return, pass_id, parseInt(pass_no_of_rides), req.ip);
+                        // console.log("getBookingIds",getBookingIds);
+                        if (getBookingIds.length > 0) {
+                            const arrCreatePayment = [];
+                            for (let bIds of getBookingIds) {
+                                const PaymentObj = {
+                                    bookingId: bIds,
+                                    walletId: checkBalance._id,
+                                    userId: userId,
+                                    is_pass: true,
+                                    amount: (parseInt(pass_amount) / parseInt(pass_no_of_rides)),
+                                    total_pass_amount: pass_amount,
+                                    orderId: "order_" + nanoid(10),
+                                    ferriOrderId: "FER_" + nanoid(15),
+                                    payment_status: "Completed",
+                                    method: payment_mode,
+                                };
+
+                                arrCreatePayment.push(PaymentObj);
+                            }
+                            // console.log("arrCreatePayment", arrCreatePayment);
+                            await Payment.insertMany(arrCreatePayment);
+                            res.status(200).json({
+                                status: true,
+                                message: "booking  payment successful completed with wallet.",
+                            });
+
+                        } else {
+                            res.status(200).json({
+                                status: false,
+                                message: "booking not found.",
+                            });
+                        }
+                    }
+                }
+
+            } else if (payment_mode === "UPI" || payment_mode === "CARD" || payment_mode === "PAYTM") {
+                const razorPaySetting = await Utils.configRazorPay(); // call utils for the Razory pay
+                const currency = razorPaySetting.payment_settings.currency;
+                const receipt = razorPaySetting.ferriOrderId;
+                const payment_capture = razorPaySetting.payment_settings.payment_capture;
+                const getBookingIds = await HelperCustom.generateSinglePass(payment_mode, userId, bus_id, route_id, pickup_stop_id, drop_stop_id, seat_no, has_return, pass_id, parseInt(pass_no_of_rides), req.ip);
+                // console.log("getBookingIds",getBookingIds);
+                if (getBookingIds.length > 0) {
+                    let parameters = {
+                        amount: parseInt(pass_amount) * 100,
+                        currency,
+                        receipt,
+                        payment_capture,
+                        notes: {
+                            bookingIds: getBooking.pnr_no,
+                        },
+                    };
+                    const razordata = await razorPaySetting.razor.orders.create(parameters);
+                    const arrCreatePayment = [];
+                    for (let bIds of getBookingIds) {
+                        const PaymentObj = {
+                            bookingId: bIds,
+                            walletId: checkBalance._id,
+                            userId: userId,
+                            is_pass: true,
+                            amount: (parseInt(pass_amount) / parseInt(pass_no_of_rides)),
+                            total_pass_amount: pass_amount,
+                            orderId: razordata.id,
+                            ferriOrderId: receipt,
+                            payment_status: "Processing",
+                            method: payment_mode,
+                        };
+
+                        arrCreatePayment.push(PaymentObj);
+                    }
+                    console.log("arrCreatePayment", arrCreatePayment);
+                    await Payment.insertMany(arrCreatePayment);
+                    const getuser = await User.findById(userId);
+
+                    res.status(200).json({
+                        status: true,
+                        message: "successfully generate booking order.",
+                        verify_url: `${process.env.BASE_URL}:${process.env.PORT}/api/booking/pass-payment-verify`,
+                        data: {
+                            orderId: data.id,
+                            amount: pass_amount,
+                            name: `Booking Ride - ${receipt}`,
+                            prefill: {
+                                name: getuser.firstname + " " + getuser.lastname,
+                                email: getuser.email,
+                                contact: getuser.phone.toString(),
+                            },
+                            notes: {
+                                ferri_order_id: receipt,
+                                booking_pnr_no: getBooking.pnr_no,
+                            },
+                            payment_settings: razorPaySetting.payment_settings,
+                        },
+                    });
+
+                }
+            }
+
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+
+        }
+    },
+    payment: async(req, res) => {
+        try {
+            const {
+                amount,
+                pnr_no,
+                payment_mode
+            } = req.body;
+            const {
+                userId,
+                walletId
+            } = req.session;
+            if (payment_mode === "WALLET") {
+                const checkBalance = await Wallet.findOne({
+                    users: userId
+                });
+                if (parseInt(checkBalance.amount) > parseInt(amount)) {
+                    const BalanceAmount = parseInt(checkBalance.amount) - parseInt(amount); // deduct amount
+                    const updateWallet = await Wallet.updateOne({
+                        users: userId
+                    }, {
+                        amount: BalanceAmount
+                    });
+                    if (updateWallet.n > 0) {
+
+                        if (await Booking.exists({
+                                pnr_no
+                            })) { // booking exists
+                            const updateObj = {
+                                travel_status: true,
+                            };
+                            const updateBooking = await Booking.findOneAndUpdate({
+                                pnr_no
+                            },
+                                    updateObj, {
+                                new: true
+                            });
+                            if (updateBooking) {
+                                const createPayment = {
+                                    bookingId: updateBooking._id,
+                                    walletId: checkBalance._id,
+                                    userId: userId,
+                                    orderId: "order_" + nanoid(10),
+                                    ferriOrderId: "FER_" + nanoid(15),
+                                    payment_status: 'Completed',
+                                    method: payment_mode,
+                                    amount: parseInt(amount),
+									title:"Ride paid",
+									type:1
+
+                                }
+
+                                await em.eventsListener.emit('UPDATE-BOOKING-TICKET', updateBooking.ticketId, updateBooking.seat_nos.length); // update
+                                await Payment.create(createPayment);
+                                res.status(200).json({
+                                    status: true,
+                                    message: "booking  payment successful with wallet.",
+                                    data: {
+                                        payment_mode,
+                                        amount
+                                    }
+                                });
+                            }
+                        } else {
+                            res.status(200).json({
+                                status: false,
+                                message: "booking not found.",
+                            });
+                        }
+                    }
+                } else {
+                    res.status(200).json({
+                        status: false,
+                        message: "you don't have enough balance.",
+                    });
+                }
+            } else if (
+                payment_mode === "UPI" ||
+                payment_mode === "CARD" ||
+                payment_mode === "PAYTM") {
+
+                if (await Booking.exists({
+                        pnr_no
+                    })) {
+                    const getBooking = await Booking.findOne({
+                        pnr_no
+                    }, "_id pnr_no");
+                    const razorPaySetting = await Utils.configRazorPay(); // call utils for the Razory pay
+                    const currency = razorPaySetting.payment_settings.currency;
+                    const receipt = razorPaySetting.ferriOrderId;
+                    const payment_capture = razorPaySetting.payment_settings.payment_capture;
+                    let parameters = {
+                        amount: (parseInt(amount) * 100),
+                        currency,
+                        receipt,
+                        payment_capture,
+                        notes: {
+                            booking_pnr_no: getBooking.pnr_no
+                        }
+                    };
+
+                    const data = await razorPaySetting.razor.orders.create(parameters);
+                    console.log('data', data)
+                    const createPayment = {
+                        bookingId: getBooking._id,
+                        walletId: walletId,
+                        userId: userId,
+                        orderId: data.id,
+                        ferriOrderId: receipt,
+                        payment_status: "Processing",
+                        amount: amount,
+                        method: payment_mode,
+						title:"Ride paid",
+						type:1
+                    };
+                    const getpayment = await Payment.create(createPayment);
+                    const getuser = await User.findById(userId);
+
+                    res.status(200).json({
+                        status: true,
+                        message: "successfully generate booking order.",
+                        verify_url: `${process.env.BASE_URL}api/booking/payment-verify`,
+                        data: {
+                            orderId: data.id,
+                            payment_mode,
+                            amount: getpayment.amount,
+                            name: `Booking Ride - ${receipt}`,
+                            prefill: {
+                                name: getuser.firstname + " " + getuser.lastname,
+                                email: getuser.email,
+                                contact: getuser.phone,
+                            },
+                            notes: {
+                                ferri_order_id: receipt,
+                                booking_pnr_no: getBooking.pnr_no,
+                            },
+                            payment_settings: razorPaySetting.payment_settings,
+                        },
+                    });
+                } else {
+                    res.status(200).json({
+                        status: false,
+                        message: "no booking pnr found.",
+                    });
+                }
+
+            }
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+    paymentVerify: async(req, res) => {
+        try {
+            const {
+                orderId,
+                paymentId,
+                signature,
+                status
+            } = req.body;
+
+            console.log('req.body', req.body)
+
+            if (await Payment.exists({
+                    orderId
+                })) {
+                const razorPaySetting = await Utils.configRazorPay(); // call utils for the Razory pay
+                const secret = razorPaySetting.payment_settings.secret;
+                let body = orderId + "|" + paymentId;
+                //  const secret = process.env.RAZOR_KEY_SECRET;
+                let expectedSignature = crypto
+                    .createHmac("sha256", secret)
+                    .update(body.toString())
+                    .digest("hex");
+                if (expectedSignature == signature && status === 'true') {
+                    const razorPaymentStatus = await razorPaySetting.razor.payments.fetch(
+                            paymentId);
+                    if (
+                        (razorPaymentStatus && razorPaymentStatus.status == "captured") ||
+                        razorPaymentStatus.status == "authorized") {
+                        const updated_payment = await Payment.findOneAndUpdate({
+                            orderId: orderId,
+                        }, {
+                            method: razorPaymentStatus.method,
+                            paymentId: paymentId,
+                            payment_signature: signature,
+                            payment_created: razorPaymentStatus.created_at,
+                            payment_status: "Completed",
+                        });
+                        const pnr_no = razorPaymentStatus.notes.booking_pnr_no;
+                        const updateBooking = await Booking.findOneAndUpdate({
+                            pnr_no
+                        }, {
+                            travel_status: "SCHEDULED"
+                        }, {
+                            new: true
+                        });
+
+                        await em.eventsListener.emit('UPDATE-BOOKING-TICKET', updateBooking.ticketId, updateBooking.seat_nos.length); // update
+
+                        res.status(200).json({
+                            status: true,
+                            message: "payment verified successfully.",
+                            verification: "success",
+                            data: {
+                                pnr_no: updateBooking.pnr_no,
+                                final_total_fare: updateBooking.final_total_fare,
+                            },
+                        });
+                    } else if (razorPaymentStatus && razorPaymentStatus.status == "failed") {
+                        const updated_payment = await Payment.findOneAndUpdate({
+                            orderId: orderId
+                        }, {
+                            method: razorPaymentStatus.method,
+                            payment_created: razorPaymentStatus.created_at,
+                            paymentId: paymentId,
+                            payment_signature: signature,
+                            payment_status: "Failed"
+                        });
+                        const pnr_no = razorPaymentStatus.notes.booking_pnr_no;
+                        const updateBooking = await Booking.findOne({
+                            pnr_no
+                        }, {
+                            travel_status: false
+                        });
+                        res.status(200).json({
+                            status: false,
+                            message: razorPaymentStatus.error_description + ' ' + razorPaymentStatus.error_reason,
+                            verification: "failed",
+                        });
+
+                    }
+                } else {
+                    res.status(200).json({
+                        status: false,
+                        message: "payment signature not matched.",
+                    });
+                }
+            } else {
+                res.status(200).json({
+                    status: false,
+                    message: "payment already completed.",
+                });
+            }
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+    passPaymentVerify: async(req, res) => {
+        try {
+            const {
+                orderId,
+                paymentId,
+                signature,
+                status
+            } = req.body;
+            const session = await mongoose.startSession(); // start transaction session
+
+            session.startTransaction();
+
+            if (await Payment.exists({
+                    order_id: orderId,
+                    payment_status: "Processing"
+                })) {
+                const razorPaySetting = await Utils.configRazorPay(); // call utils for the Razory pay
+                const secret = razorPaySetting.payment_settings.secret;
+                let body = orderId + "|" + paymentId;
+                let expectedSignature = crypto.createHmac("sha256", secret).update(body.toString()).digest("hex");
+                if (expectedSignature == signature && status == "true") {
+                    const razorPaymentStatus = await razorPaySetting.razor.payments.fetch(paymentId);
+                    if ((razorPaymentStatus && razorPaymentStatus.status == "captured") || razorPaymentStatus.status == "authorized") {
+                        const obj = {
+                            method: razorPaymentStatus.method,
+                            paymentId: paymentId,
+                            payment_signature: signature,
+                            payment_created: razorPaymentStatus.created_at,
+                            payment_status: "Completed",
+                            payment_details: {
+                                notes: razorPaymentStatus.notes,
+                                description: razorPaymentStatus.description,
+                                wallet: razorPaymentStatus.wallet
+                                 ? razorPaymentStatus.wallet
+                                 : "",
+                                invoice_id: razorPaymentStatus.invoice_id
+                                 ? razorPaymentStatus.invoice_id
+                                 : "",
+                                bank: razorPaymentStatus.bank ? razorPaymentStatus.bank : "",
+                                card_id: razorPaymentStatus.card_id
+                                 ? razorPaymentStatus.card_id
+                                 : "",
+                                vpa: razorPaymentStatus.vpa ? razorPaymentStatus.vpa : "",
+                                fee: razorPaymentStatus.fee,
+                                tax: razorPaymentStatus.tax,
+                                created_at: razorPaymentStatus.created_at,
+                                captured: razorPaymentStatus.captured,
+                            }
+                        }
+                        const findPayments = await find({
+                            orderId
+                        }, "bookingId orderId");
+                        const bookingIds = findPayments.map((p) => p.bookingId);
+                        const updatedPayments = await Payment.updateMany({
+                            orderId
+                        }, obj);
+                        const updateBooking = await Booking.updateMany({
+                            _id: {
+                                $in: bookingIds
+                            }
+                        }, {
+                            travel_status: "SCHEDULED"
+                        });
+                        await em.eventsListener.emit('UPDATE-All-BOOKING-TICKET', bookingIds); // update
+
+                    }
+                } else {
+                    res.status(200).json({
+                        status: false,
+                        message: "payment signature not matched.",
+                    });
+                }
+            } else {
+                res.status(200).json({
+                    status: false,
+                    message: "payment already completed.",
+                });
+            }
+            await session.commitTransaction();
+        } catch (err) {
+            console.log("err ehile : " + err);
+            await session.abortTransaction();
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+    setreminder: async(req, res) => {
+        try {
+            const {
+                pnr_no,
+                every,
+                time
+            } = req.body;
+            const {
+                userId
+            } = req.session;
+            if (await Booking.exists({
+                    pnr_no
+                })) {
+                const getBooking = await Booking.findOne({
+                    pnr_no
+                },
+                        "_id start_time start_date");
+                const bookingId = getBooking._id;
+                const bookedDateTime = getBooking.start_date + ' ' + getBooking.start_time;
+                console.log('sadasd ', getBooking.start_date + ' ' + getBooking.start_time)
+                const datetime = moment(bookedDateTime, 'YYYY-MM-DD hh:mm A').subtract(parseInt(time), 'minutes');
+
+                console.log('new datetime : ', moment(datetime).format('LLL'))
+
+                await Reminder.create(userId, bookingId, datetime, every);
+
+                res.status(200).json({
+                    status: true,
+                    message: "booking reminder set successfully.",
+                });
+            } else {
+                res.status(200).json({
+                    status: false,
+                    message: "booking pnr no not exists.",
+                });
+            }
+        } catch (err) {
+            console.log("err ehile : " + err);
+            res.status(404).json({
+                status: false,
+                message: "error while : " + err,
+            });
+        }
+    },
+};
